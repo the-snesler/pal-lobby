@@ -193,7 +193,7 @@ function monitorWSHandler(_ms: monitorSession, ws: WebSocket) {
     fetchSteamFriends()
     .then(friends => steamFriendsToPals(friends))
     .then(({ pals, activities }) => {
-      activities.forEach(a => activityCache.set(a.id, a));
+      activities.forEach(a => activityCache.set(`${a.type}:${a.id}`, a));
       wsSend("activities", JSON.stringify(activities));
       wsSend("pals", JSON.stringify(pals));
     })
@@ -213,7 +213,7 @@ function monitorWSHandler(_ms: monitorSession, ws: WebSocket) {
         wsSend("err", "Activity not found");
         return;
       }
-      wsSend("activities", JSON.stringify(activity));
+      wsSend("activities", JSON.stringify([activity]));
     }
   });
 
@@ -271,6 +271,7 @@ async function fetchSteamGridDBImage(appId: string): Promise<string | null> {
 async function steamFriendsToPals(friends: SteamFriendProfile[]): Promise<{ pals: lobbyPal[], activities: lobbyActivity[] }> {
   const pals = friends.map(f => {
     return {
+      id: `steam:${f.steamid}`,
       name: f.personaname,
       avatarURL: "https://avatars.fastly.steamstatic.com/" + f.avatarhash + "_medium.jpg",
       status: steamStatusToPalStatus(f.personastate),
@@ -326,10 +327,11 @@ interface SteamFriendProfile {
 }
 
 interface lobbyPal {
+  id: string; // steam:steamid, stable across renames
   name: string;
   avatarURL: string;
   status: 0 | 1 | 2; // 0 = offline, 1 = idle, 2 = online
-  activityID?: string; // steam:id or discord:id
+  activity?: string; // steam:id or discord:id
 }
 interface lobbyActivity {
   type: "steam" | "discord";
