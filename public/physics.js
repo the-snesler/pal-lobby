@@ -27,6 +27,8 @@ export const params = {
  *  - "offline" free-floating, pushed out of the inner area
  *  - "group"   free-floating, pulled toward the center
  *  - "member"  sits on a slot relative to `anchor`; ignores collisions
+ *  - "attached" rigidly fixed to a slot on `anchor` and collides on its behalf
+ *               (e.g. a group's label); pushes it receives move the anchor
  */
 export class Body {
   x;
@@ -39,7 +41,7 @@ export class Body {
   /** Extra gap (px) this body likes to keep from its neighbours. */
   space = 0;
   kind = "online";
-  /** For members: the group body plus slot offset from its center. */
+  /** For members and attached bodies: the body they follow, plus slot offset from its center. */
   anchor = null;
   slotX = 0;
   slotY = 0;
@@ -68,6 +70,10 @@ export class Body {
 }
 
 function interact(a, b) {
+  // Attached bodies collide on behalf of their anchor.
+  const ownerA = a.kind === "attached" ? a.anchor : a;
+  const ownerB = b.kind === "attached" ? b.anchor : b;
+  if (ownerA === ownerB) return;
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const space = (a.space + b.space) / 2;
@@ -94,13 +100,13 @@ function interact(a, b) {
   if (gap < 0) push += params.collisionStiffness * -gap;
 
   // Lighter bodies get pushed further.
-  const total = a.mass + b.mass;
-  const aShare = (push * b.mass) / total;
-  const bShare = (push * a.mass) / total;
-  a.ax -= nx * aShare;
-  a.ay -= ny * aShare;
-  b.ax += nx * bShare;
-  b.ay += ny * bShare;
+  const total = ownerA.mass + ownerB.mass;
+  const aShare = (push * ownerB.mass) / total;
+  const bShare = (push * ownerA.mass) / total;
+  ownerA.ax -= nx * aShare;
+  ownerA.ay -= ny * aShare;
+  ownerB.ax += nx * bShare;
+  ownerB.ay += ny * bShare;
 }
 
 function wallForce(pos, radius, size) {
@@ -125,6 +131,10 @@ export function step(bodies, world, dt = STEP) {
   for (const b of bodies) {
     b.ax = 0;
     b.ay = 0;
+    if (b.kind === "attached") {
+      b.x = b.anchor.x + b.slotX;
+      b.y = b.anchor.y + b.slotY;
+    }
   }
 
   const free = bodies.filter((b) => b.kind !== "member");
@@ -135,6 +145,7 @@ export function step(bodies, world, dt = STEP) {
   }
 
   for (const b of bodies) {
+    if (b.kind === "attached") continue;
     const scale = Math.min(1, params.referenceRadius / Math.max(b.radius, 1));
     const [wx, wy] = b.wander(time);
 
@@ -189,6 +200,7 @@ export function step(bodies, world, dt = STEP) {
 
   const damping = Math.exp(-params.damping * dt);
   for (const b of bodies) {
+    if (b.kind === "attached") continue;
     b.vx = (b.vx + b.ax * dt) * damping;
     b.vy = (b.vy + b.ay * dt) * damping;
     const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);

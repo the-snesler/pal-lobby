@@ -5,13 +5,16 @@ const height = 600;
 const palRadius = 20;
 const offlineRadius = palRadius * 0.6;
 const maxGroupRadius = 70;
-/** How quickly displayed sizes ease toward their targets, 1/s. */
-const sizeRate = 8;
+const badgeRadius = 10;
+const labelFont = "italic 700 13px system-ui, sans-serif";
+const labelColliderRadius = 9;
 const backendUrl = "http://localhost:3000";
 
 /** @type {HTMLCanvasElement} */
 const canvas = document.getElementById("canvas");
 const context = canvas.getContext("2d");
+const measureContext = document.createElement("canvas").getContext("2d");
+measureContext.font = labelFont;
 
 /** Mouse position in canvas coordinates, or null when outside the canvas. */
 let mouse = null;
@@ -23,8 +26,48 @@ function loadImage(url, onLoad) {
   img.src = url;
 }
 
-function ease(current, target, dt) {
-  return current + (target - current) * (1 - Math.exp(-sizeRate * dt));
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+/** A damped spring for animating a value. Under-damped springs overshoot, giving a "pop". */
+class Spring {
+  velocity = 0;
+
+  constructor(value, stiffness, dampingRatio) {
+    this.value = value;
+    this.stiffness = stiffness;
+    this.damping = 2 * dampingRatio * Math.sqrt(stiffness);
+  }
+
+  update(target, dt) {
+    // Substep so large frame times stay stable.
+    for (let left = dt; left > 0; left -= STEP) {
+      const h = Math.min(STEP, left);
+      this.velocity += (this.stiffness * (target - this.value) - this.damping * this.velocity) * h;
+      this.value += this.velocity * h;
+    }
+  }
+}
+
+function circlePath(ctx, x, y, r) {
+  ctx.beginPath();
+  ctx.arc(x, y, Math.max(0, r), 0, Math.PI * 2);
+}
+
+/** Draw an image clipped to a circle, scaled to cover it and centered. */
+function drawCircleImage(ctx, img, x, y, r, fallback) {
+  ctx.save();
+  circlePath(ctx, x, y, r);
+  if (img) {
+    ctx.clip();
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    const scale = Math.max((2 * r) / iw, (2 * r) / ih);
+    ctx.drawImage(img, x - (iw * scale) / 2, y - (ih * scale) / 2, iw * scale, ih * scale);
+  } else {
+    ctx.fillStyle = fallback;
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 class Pal {
@@ -39,8 +82,8 @@ class Pal {
   gone = false;
   img = null;
   grayImg = null;
-  /** Displayed radius; eases toward targetRadius. Starts at 0 so pals pop in. */
-  radius = 0;
+  /** Displayed radius. Starts at 0 so pals pop in. */
+  size = new Spring(0, 220, 0.55);
   body;
 
   constructor({ id, name, avatarURL, status, activity }) {
@@ -60,16 +103,31 @@ class Pal {
     });
   }
 
+  get radius() {
+    return Math.max(0, this.size.value);
+  }
+
   get targetRadius() {
     if (this.gone) return 0;
     return this.status ? palRadius : offlineRadius;
   }
 
+  /** Sitting inside a group circle, as opposed to free (possibly wearing a badge). */
+  get inCircle() {
+    return this.group?.mode === "circle";
+  }
+
+  /** Where a solo-game badge sits, relative to the pal's center: the upper-right rim. */
+  badgeOffset() {
+    const d = this.radius * 0.8;
+    return [d * Math.SQRT1_2, -d * Math.SQRT1_2];
+  }
+
   updateBody(dt) {
-    this.radius = ease(this.radius, this.targetRadius, dt);
+    this.size.update(this.targetRadius, dt);
     const body = this.body;
     body.radius = this.radius;
-    if (this.group) {
+    if (this.inCircle) {
       body.kind = "member";
       body.anchor = this.group.body;
       [body.slotX, body.slotY] = this.group.slotFor(this);
@@ -86,19 +144,17 @@ class Pal {
     const { x, y } = this.body;
     const r = this.radius;
     if (r < 0.5) return;
-    const img = this.status ? this.img : this.grayImg;
-    if (img) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.clip();
-      ctx.drawImage(img, x - r, y - r, r * 2, r * 2);
-      ctx.restore();
+    if (this.status) {
+      drawCircleImage(ctx, this.img, x, y, r, "#555");
     } else {
-      ctx.fillStyle = this.status ? "#555" : "#222";
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
+      drawCircleImage(ctx, this.grayImg, x, y, r, "#222");
+    }
+    if (this.inCircle) {
+      // Separate members from the game art behind them.
+      circlePath(ctx, x, y, r);
+      ctx.strokeStyle = "white";
+      ctx.lineWidth = 2;
+      ctx.stroke();
     }
   }
 }
@@ -114,67 +170,191 @@ function grayscale(img) {
   return off;
 }
 
+/**
+ * Everyone playing one game. With 2+ members it's a circle floating on its own with
+ * the members inside; with one member it's a small badge pinned to that pal.
+ */
 class Group {
   activityID;
+  name;
   /** @type {Pal[]} */
   members = [];
+  /** @type {"circle" | "badge"} */
+  mode = "badge";
+  /** The pal wearing the badge (kept while the group shrinks away). */
+  badgePal = null;
   img = null;
-  /** Displayed radius; eases toward targetRadius. */
-  radius = 0;
+  size = new Spring(0, 140, 0.45);
   body;
+  /** Current label layout, or null while it's hidden. */
+  label = null;
+  /** Invisible bodies along the label so pals don't drift over it. */
+  labelBodies = [];
 
-  constructor(activityID, backgroundURL, x, y) {
+  constructor(activityID, activity, x, y) {
     this.activityID = activityID;
+    this.name = activity.name;
     this.body = new Body(x, y, 0);
-    this.body.kind = "group";
     this.body.space = 30;
-    loadImage(backgroundURL, (img) => (this.img = img));
+    loadImage(activity.backgroundURL, (img) => (this.img = img));
   }
 
   get dying() {
     return this.members.length === 0;
   }
 
-  get targetRadius() {
-    if (this.dying) return 0;
-    const live = groups.filter((g) => !g.dying).length;
-    return Math.min(maxGroupRadius, 400 / live);
+  get radius() {
+    return Math.max(0, this.size.value);
   }
 
-  /** Offset of a member's slot from the group's center. */
+  get targetRadius() {
+    if (this.dying) return 0;
+    if (this.mode === "badge") return badgeRadius;
+    const circles = groups.filter((g) => g.mode === "circle" && !g.dying).length;
+    return Math.min(maxGroupRadius, 45 + 8 * this.members.length, 400 / circles);
+  }
+
+  /** Offset of a member's slot from the group's center: an inner ring, poking past the rim. */
   slotFor(pal) {
+    const n = this.members.length;
     const index = this.members.indexOf(pal);
-    const angle = -Math.PI / 2 + (index * 2 * Math.PI) / this.members.length;
-    return [this.radius * Math.cos(angle), this.radius * Math.sin(angle)];
+    // Rotate by half a step so nobody sits on top of the label.
+    const angle = -Math.PI / 2 + ((index + 0.5) * 2 * Math.PI) / n;
+    const d = Math.max(0, this.radius - palRadius * 0.6);
+    return [d * Math.cos(angle), d * Math.sin(angle)];
   }
 
   updateBody(dt) {
-    this.radius = ease(this.radius, this.targetRadius, dt);
-    // Members sit on the perimeter, so collide with room for them.
-    this.body.radius = this.radius + (this.dying ? 0 : palRadius);
+    // Keep the last mode while dying so it shrinks away where it was.
+    if (this.members.length >= 2) {
+      this.mode = "circle";
+    } else if (this.members.length === 1) {
+      this.mode = "badge";
+      this.badgePal = this.members[0];
+    }
+    this.size.update(this.targetRadius, dt);
+
+    const body = this.body;
+    if (this.mode === "circle") {
+      body.kind = "group";
+      body.anchor = null;
+      // Room for members poking past the rim.
+      body.radius = this.radius + palRadius * 0.4;
+    } else {
+      // Ride along on the pal; the spring makes it fly there smoothly after a circle collapses.
+      body.kind = "member";
+      body.anchor = this.badgePal.body;
+      [body.slotX, body.slotY] = this.badgePal.badgeOffset();
+      body.radius = this.radius;
+    }
+    this.layoutLabel();
+  }
+
+  /** The game name above the ring (or below, near the top edge), faded in with size. */
+  layoutLabel() {
+    const r = this.radius;
+    const alpha = clamp01((r - 25) / 25);
+    if (this.mode !== "circle" || this.dying || alpha <= 0 || !this.name) {
+      this.label = null;
+      this.labelBodies = [];
+      return;
+    }
+    const ring = r + 7;
+    // Hysteresis so it doesn't flicker when hovering near the edge.
+    const top = this.body.y - ring - 24;
+    const below = this.label?.below ? top < 10 : top < 0;
+    const text = truncate(measureContext, this.name, Math.max(120, r * 2.6));
+    const textWidth = measureContext.measureText(text).width;
+    this.label = { text, alpha, ring, below };
+
+    const count = Math.max(1, Math.ceil(textWidth / (labelColliderRadius * 2.5)));
+    const spread = Math.max(0, textWidth / 2 - labelColliderRadius);
+    const offsetY = (below ? 1 : -1) * (ring + 17);
+    while (this.labelBodies.length < count) {
+      const b = new Body(this.body.x, this.body.y, labelColliderRadius);
+      b.kind = "attached";
+      b.anchor = this.body;
+      b.space = 6;
+      this.labelBodies.push(b);
+    }
+    this.labelBodies.length = count;
+    this.labelBodies.forEach((b, i) => {
+      b.slotX = count === 1 ? 0 : -spread + (2 * spread * i) / (count - 1);
+      b.slotY = offsetY;
+    });
   }
 
   /** @param {CanvasRenderingContext2D} ctx */
-  draw(ctx) {
+  drawCircle(ctx) {
+    const { x, y } = this.body;
+    const r = this.radius;
+    if (r < 0.5) return;
+    drawCircleImage(ctx, this.img, x, y, r, "gray");
+    // Outer ring fades in as the circle grows.
+    const alpha = clamp01((r - 15) / 25);
+    if (alpha > 0) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      circlePath(ctx, x, y, r + 7);
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.2)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  /** @param {CanvasRenderingContext2D} ctx */
+  drawBadge(ctx) {
     const { x, y } = this.body;
     const r = this.radius;
     if (r < 0.5) return;
     ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
+    ctx.shadowBlur = 4;
+    ctx.shadowOffsetY = 1;
+    circlePath(ctx, x, y, r + 2);
+    ctx.fillStyle = "white";
+    ctx.fill();
+    ctx.restore();
+    drawCircleImage(ctx, this.img, x, y, r, "gray");
+  }
+
+  /** Game name with a tick down to the ring. */
+  drawLabel(ctx) {
+    if (!this.label) return;
+    const { x, y } = this.body;
+    const { text, alpha, ring, below } = this.label;
+    const dir = below ? 1 : -1;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = labelFont;
+    ctx.textAlign = "center";
+
     ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    if (this.img) {
-      ctx.clip();
-      // Cover-fit: fill the circle and center the art.
-      const scale = Math.max((2 * r) / this.img.width, (2 * r) / this.img.height);
-      const w = this.img.width * scale;
-      const h = this.img.height * scale;
-      ctx.drawImage(this.img, x - w / 2, y - h / 2, w, h);
-    } else {
-      ctx.fillStyle = "gray";
-      ctx.fill();
-    }
+    ctx.moveTo(x, y + dir * ring);
+    ctx.lineTo(x, y + dir * (ring + 7));
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.textBaseline = below ? "top" : "bottom";
+    const ty = y + dir * (ring + 9);
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "white";
+    ctx.strokeText(text, x, ty);
+    ctx.fillStyle = "#222";
+    ctx.fillText(text, x, ty);
     ctx.restore();
   }
+}
+
+function truncate(ctx, text, maxWidth) {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let end = text.length;
+  while (end > 1 && ctx.measureText(text.slice(0, end) + "…").width > maxWidth) end--;
+  return text.slice(0, end).trimEnd() + "…";
 }
 
 /** @type {Pal[]} */
@@ -187,7 +367,7 @@ const knownActivities = new Map();
 /** Put each pal in the group for its current activity, creating or emptying groups as needed. */
 function syncGroups() {
   for (const pal of pals) {
-    const wanted = !pal.gone && knownActivities.has(pal.activity) ? pal.activity : null;
+    const wanted = !pal.gone && pal.status && knownActivities.has(pal.activity) ? pal.activity : null;
     if (pal.group && pal.group.activityID !== wanted) {
       pal.group.members = pal.group.members.filter((m) => m !== pal);
       pal.group = null;
@@ -195,7 +375,8 @@ function syncGroups() {
     if (wanted && !pal.group) {
       let group = groups.find((g) => g.activityID === wanted);
       if (!group) {
-        group = new Group(wanted, knownActivities.get(wanted).backgroundURL, pal.body.x, pal.body.y);
+        const [bx, by] = pal.badgeOffset();
+        group = new Group(wanted, knownActivities.get(wanted), pal.body.x + bx, pal.body.y + by);
         groups.push(group);
       }
       group.members.push(pal);
@@ -221,10 +402,13 @@ function render() {
   context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   context.imageSmoothingQuality = "high";
   context.clearRect(0, 0, width, height);
-  groups.forEach((g) => g.draw(context));
-  // Offline at the bottom, then free online pals, then group members on top of their groups.
-  const layer = (p) => (p.group ? 2 : p.status ? 1 : 0);
+  const circles = groups.filter((g) => g.mode === "circle");
+  circles.forEach((g) => g.drawCircle(context));
+  // Offline at the bottom, then free online pals, then group members on top of their circles.
+  const layer = (p) => (p.inCircle ? 2 : p.status ? 1 : 0);
   [...pals].sort((a, b) => layer(a) - layer(b)).forEach((p) => p.draw(context));
+  groups.filter((g) => g.mode === "badge").forEach((g) => g.drawBadge(context));
+  circles.forEach((g) => g.drawLabel(context));
 }
 
 let simTime = 0;
@@ -236,12 +420,16 @@ function frame(now) {
   const dt = lastFrame === null ? 0 : Math.min((now - lastFrame) / 1000, 0.1);
   lastFrame = now;
 
-  pals.forEach((p) => p.updateBody(dt));
+  // Groups first: pals need to know whether their group is a circle or a badge.
   groups.forEach((g) => g.updateBody(dt));
-  pals = pals.filter((p) => !(p.gone && p.radius < 0.5));
-  groups = groups.filter((g) => !(g.dying && g.radius < 0.5));
+  pals.forEach((p) => p.updateBody(dt));
+  pals = pals.filter((p) => !(p.gone && p.size.value < 0.5));
+  groups = groups.filter((g) => !(g.dying && g.size.value < 0.5));
 
-  const bodies = [...groups.map((g) => g.body), ...pals.map((p) => p.body)];
+  const bodies = [
+    ...groups.flatMap((g) => [g.body, ...g.labelBodies]),
+    ...pals.map((p) => p.body),
+  ];
   accumulator += dt;
   while (accumulator >= STEP) {
     step(bodies, { width, height, mouse, time: simTime }, STEP);
