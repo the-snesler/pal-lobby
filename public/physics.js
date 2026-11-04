@@ -1,7 +1,7 @@
 // Lobby physics. Pure (no DOM) so it can be simulated outside the browser.
 // Units: pixels and seconds. Integrate with a fixed timestep of STEP.
 
-export const STEP = 1 / 240;
+export const STEP = 1 / 120;
 
 export const params = {
   damping: 2.5, // velocity decay rate, 1/s
@@ -28,7 +28,8 @@ export const params = {
  *  - "group"   free-floating, pulled toward the center
  *  - "member"  sits on a slot relative to `anchor`; ignores collisions
  *  - "attached" rigidly fixed to a slot on `anchor` and collides on its behalf
- *               (e.g. a group's label); pushes it receives move the anchor
+ *               (e.g. a group's label); pushes it receives move the anchor, or the
+ *               anchor's group if the anchor is a member
  */
 export class Body {
   x;
@@ -41,6 +42,8 @@ export class Body {
   /** Extra gap (px) this body likes to keep from its neighbours. */
   space = 0;
   kind = "online";
+  /** Not pushed by the cursor (e.g. while it's hovered). */
+  ignoreMouse = false;
   /** For members and attached bodies: the body they follow, plus slot offset from its center. */
   anchor = null;
   slotX = 0;
@@ -69,10 +72,15 @@ export class Body {
   }
 }
 
+/** The free body that takes the push for `b`: attached bodies and members act for their anchor. */
+function ownerOf(b) {
+  while (b.kind === "attached" || b.kind === "member") b = b.anchor;
+  return b;
+}
+
 function interact(a, b) {
-  // Attached bodies collide on behalf of their anchor.
-  const ownerA = a.kind === "attached" ? a.anchor : a;
-  const ownerB = b.kind === "attached" ? b.anchor : b;
+  const ownerA = ownerOf(a);
+  const ownerB = ownerOf(b);
   if (ownerA === ownerB) return;
   const dx = b.x - a.x;
   const dy = b.y - a.y;
@@ -120,7 +128,8 @@ function wallForce(pos, radius, size) {
 /**
  * Advance the simulation by one fixed step.
  * @param {Body[]} bodies
- * @param {{ width: number, height: number, mouse: {x: number, y: number} | null, time: number }} world
+ * @param {{ width: number, height: number, mouse: {x: number, y: number, push?: number} | null, time: number }} world
+ *   mouse.push (0-1) scales the cursor's push, e.g. by how fast it's moving
  * @param {number} dt
  */
 export function step(bodies, world, dt = STEP) {
@@ -182,13 +191,13 @@ export function step(bodies, world, dt = STEP) {
     b.ax += wallForce(b.x, b.radius, width);
     b.ay += wallForce(b.y, b.radius, height);
 
-    if (mouse) {
+    if (mouse && !b.ignoreMouse) {
       const mx = b.x - mouse.x;
       const my = b.y - mouse.y;
       const reach = params.mouseRadius + b.radius;
       const md = Math.sqrt(mx * mx + my * my);
       if (md < reach && md > 1e-6) {
-        const strength = params.mouseStrength * (1 - md / reach) * scale;
+        const strength = params.mouseStrength * (mouse.push ?? 1) * (1 - md / reach) * scale;
         b.ax += (mx / md) * strength;
         b.ay += (my / md) * strength;
       }

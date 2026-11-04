@@ -232,7 +232,21 @@ function chunks<T>(array: T[], chunkSize: number): T[][] {
   return result;
 }
 
+/** Nicknames you've set for friends, keyed by 64-bit SteamID. Best-effort: empty on failure. */
+async function fetchSteamNicknames(): Promise<Map<string, string>> {
+  try {
+    const data = await fetch("https://api.steampowered.com/IPlayerService/GetNicknameList/v1/?access_token=" + steamAccessToken).then(res => res.json());
+    const list: { accountid: number, nickname: string }[] = data?.response?.nicknames ?? [];
+    // The list uses 32-bit account IDs; convert to the 64-bit individual-account SteamID.
+    return new Map(list.map(n => [(BigInt("76561197960265728") + BigInt(n.accountid)).toString(), n.nickname]));
+  } catch (error) {
+    console.error("Error fetching Steam nicknames:", error);
+    return new Map();
+  }
+}
+
 async function fetchSteamFriends() {
+  const nicknamesPromise = fetchSteamNicknames();
   const friendIDs = await fetch("https://api.steampowered.com/ISteamUserOAuth/GetFriendList/v1/?access_token=" + steamAccessToken).then(res => res.json()).then(data => data.friends.filter((f: any) => f.relationship === "friend").map((f: any) => f.steamid));
   const friendProfiles = await Promise.all(chunks(friendIDs, 30)
     .map(async (chunk) => {
@@ -240,7 +254,8 @@ async function fetchSteamFriends() {
       return profileData;
     })
   );
-  return friendProfiles.flat();
+  const nicknames = await nicknamesPromise;
+  return friendProfiles.flat().map((f: SteamFriendProfile) => ({ ...f, nickname: nicknames.get(f.steamid) }));
 }
 
 function steamStatusToPalStatus(steamStatus: number): 0 | 1 | 2 {
@@ -272,7 +287,7 @@ async function steamFriendsToPals(friends: SteamFriendProfile[]): Promise<{ pals
   const pals = friends.map(f => {
     return {
       id: `steam:${f.steamid}`,
-      name: f.personaname,
+      name: f.nickname || f.personaname,
       avatarURL: "https://avatars.fastly.steamstatic.com/" + f.avatarhash + "_medium.jpg",
       status: steamStatusToPalStatus(f.personastate),
       activity: f.gameid !== undefined ? `steam:${f.gameid}` : undefined,
@@ -324,6 +339,7 @@ interface SteamFriendProfile {
   personastateflags: number;
   gameextrainfo?: string; // Only if in game
   gameid?: string;
+  nickname?: string; // set by us from GetNicknameList, not part of the summary
 }
 
 interface lobbyPal {
