@@ -3,47 +3,60 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>User Mapping</title>
+    <title>Pals</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body class="mapping-page">
     <div class="container">
-        <h1>Create User Mappings</h1>
+        <h1>Pals</h1>
+        <p class="hint">
+            Only the pals listed here show up in the <a href="/">lobby</a>. Their Steam account provides status and games;
+            a linked Discord account fills in when Steam doesn't show a game.
+        </p>
 
+        <div class="toolbar">
+            <button id="save">Save</button>
+            <button id="fill-steam" class="secondary">Fill from Steam friends</button>
+            <span id="save-status"></span>
+        </div>
+
+        <h2 id="editor-title">Add a pal</h2>
         <div class="columns">
-            <!-- Discord Column -->
-            <div class="column">
-                <h2>Discord Users</h2>
-                <input type="text" id="discord-search" placeholder="Search Discord users...">
-                <div id="discord-list-container">
-                    <div id="discord-list">Loading Discord users...</div>
-                </div>
-                <div class="selected-user" id="selected-discord">Selected: None</div>
-            </div>
-
             <!-- Steam Column -->
             <div class="column">
-                <h2>Steam Friends</h2>
-                <div id="steam-login-status" style="display: none; color: yellow; margin-bottom: 10px;">Steam not logged in.</div>
+                <h3>Steam</h3>
+                <div id="steam-login-status" class="warning" hidden>Steam isn't logged in. Log in from the <a href="/">lobby</a> page.</div>
                 <input type="text" id="steam-search" placeholder="Search Steam friends...">
                 <div id="steam-list-container">
                     <div id="steam-list">Loading Steam friends...</div>
                 </div>
                 <div class="selected-user" id="selected-steam">Selected: None</div>
             </div>
+
+            <!-- Discord Column -->
+            <div class="column">
+                <h3>Discord</h3>
+                <input type="text" id="discord-search" placeholder="Search Discord users...">
+                <div id="discord-list-container">
+                    <div id="discord-list">Loading Discord users...</div>
+                </div>
+                <div class="selected-user" id="selected-discord">Selected: None</div>
+            </div>
         </div>
 
         <div class="mapping-controls">
-            <input type="text" id="nickname" placeholder="Enter Nickname">
-            <button id="add-mapping">Add Mapping</button>
+            <input type="text" id="nickname" placeholder="Name shown in the lobby" maxlength="64">
+            <button id="add-mapping">Add Pal</button>
+            <button id="clear-editor" class="secondary">Clear</button>
         </div>
 
-        <h2>Current Mappings</h2>
-        <div id="current-mappings">No mappings created yet.</div>
+        <h2>Current pals (<span id="pal-count">0</span>)</h2>
+        <div id="current-mappings">Loading...</div>
 
-        <h2>Generated Config Snippet</h2>
-        <textarea id="output-json" rows="10" readonly placeholder="'userMapping' JSON will appear here..."></textarea>
-
+        <details>
+            <summary>Raw config</summary>
+            <textarea id="output-json" rows="10" readonly></textarea>
+        </details>
     </div>
 
     <script src="mapping.js"></script>
