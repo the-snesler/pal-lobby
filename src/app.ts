@@ -307,12 +307,43 @@ function steamStatusToPalStatus(steamStatus: number): 0 | 1 | 2 {
 
 const client = new SGDB(process.env.STEAMGRIDDB_API_KEY || "");
 const gridDimensions = ['1024x1024', '512x512'];
-async function fetchSteamGridDBImage(appId: string): Promise<string | null> {
+
+interface GameArt {
+  /** Square cover, used for group circles. */
+  grid: string | null;
+  /** Small square icon, used for solo badges. */
+  icon: string | null;
+}
+
+/** Grid and icon from SteamGridDB, by Steam app id ("steam") or SteamGridDB game id ("game"). */
+async function fetchSteamGridDBArt(type: 'steam' | 'game', id: number): Promise<GameArt> {
+  const [grids, icons] = await Promise.all([
+    client.getGrids({ type, id, dimensions: gridDimensions }),
+    client.getIcons({ type, id, mimes: ['image/png'] }),
+  ].map(request => request.catch((error) => {
+    console.error(`Error fetching SteamGridDB art for ${type} ${id}:`, error);
+    return [];
+  })));
+  // Prefer the game's own icon over fan-made ones.
+  // (The API returns style as a string, though the typings say string[].)
+  const icon = icons.find(i => [i.style].flat().includes('official')) ?? icons[0];
+  return { grid: grids[0]?.url.toString() ?? null, icon: icon?.url.toString() ?? null };
+}
+
+/** The small icon Steam shows next to a game in the friends list (32x32). */
+async function fetchSteamCommunityIcon(appID: string): Promise<string | null> {
+  const input = {
+    ids: [{ appid: Number(appID) }],
+    context: { language: "english", country_code: "US" },
+    data_request: { include_assets: true },
+  };
   try {
-    const gridData = await client.getGrids({ type: 'steam', id: parseInt(appId), dimensions: gridDimensions });
-    return gridData?.[0]?.url.toString() ?? null;
+    const res = await fetch("https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?input_json=" + encodeURIComponent(JSON.stringify(input)));
+    if (!res.ok) return null;
+    const hash = (await res.json())?.response?.store_items?.[0]?.assets?.community_icon;
+    return hash ? `https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/${appID}/${hash}.jpg` : null;
   } catch (error) {
-    console.error('Error fetching from SteamGridDB:', error);
+    console.error(`Error fetching Steam icon for ${appID}:`, error);
     return null;
   }
 }
@@ -323,16 +354,14 @@ function normalizeGameName(name: string) {
 }
 
 /** SteamGridDB art for a game that isn't on Steam, matched by exact name. */
-async function fetchSteamGridDBImageByName(name: string): Promise<string | null> {
+async function fetchSteamGridDBArtByName(name: string): Promise<GameArt> {
   try {
     const game = (await client.searchGame(name)).find(g => normalizeGameName(g.name) === normalizeGameName(name));
-    if (!game) return null;
-    const gridData = await client.getGrids({ type: 'game', id: game.id, dimensions: gridDimensions });
-    return gridData?.[0]?.url.toString() ?? null;
+    if (game) return await fetchSteamGridDBArt('game', game.id);
   } catch (error) {
     console.error('Error searching SteamGridDB:', error);
-    return null;
   }
+  return { grid: null, icon: null };
 }
 
 /** The Steam app with exactly this name, if there is one. */
@@ -370,9 +399,10 @@ function lookupActivity(key: string, lookup: () => Promise<lobbyActivity | null>
 
 function steamActivity(appID: string) {
   return lookupActivity(`steam:${appID}`, async () => {
-    const [storeData, gridImage] = await Promise.all([
+    const [storeData, art, steamIcon] = await Promise.all([
       fetch("https://store.steampowered.com/api/appdetails?appids=" + appID).then(res => res.json()),
-      fetchSteamGridDBImage(appID),
+      fetchSteamGridDBArt('steam', parseInt(appID)),
+      fetchSteamCommunityIcon(appID),
     ]);
     // Non-Steam shortcuts and delisted apps have no store page.
     const app = storeData?.[appID];
@@ -381,7 +411,9 @@ function steamActivity(appID: string) {
       type: "steam" as const,
       id: appID,
       name: app.data.name,
-      backgroundURL: gridImage || app.data.header_image,
+      backgroundURL: art.grid || app.data.header_image,
+      // Steam's own icon matches what the friends list shows.
+      iconURL: steamIcon ?? art.icon ?? undefined,
     };
   });
 }
@@ -393,10 +425,17 @@ function discordActivity(game: DiscordGame) {
     const steamAppID = await findSteamApp(game.name);
     const fromSteam = steamAppID && await steamActivity(steamAppID);
     if (fromSteam) return fromSteam;
-    const art = await fetchSteamGridDBImageByName(game.name)
-      ?? (game.applicationID && await fetchAppIconURL(game.applicationID))
-      ?? game.imageURL;
-    return { type: "discord" as const, id, name: game.name, backgroundURL: art ?? "" };
+    const [art, appIcon] = await Promise.all([
+      fetchSteamGridDBArtByName(game.name),
+      game.applicationID ? fetchAppIconURL(game.applicationID) : null,
+    ]);
+    return {
+      type: "discord" as const,
+      id,
+      name: game.name,
+      backgroundURL: art.grid ?? appIcon ?? game.imageURL ?? "",
+      iconURL: appIcon ?? art.icon ?? undefined,
+    };
   });
 }
 
@@ -465,6 +504,7 @@ interface lobbyActivity {
   id: string;
   name: string;
   backgroundURL: string;
+  iconURL?: string; // for solo badges; clients fall back to backgroundURL
 }
 
 export default server;

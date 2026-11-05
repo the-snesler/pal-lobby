@@ -83,15 +83,47 @@ function circlePath(ctx, x, y, r) {
 }
 
 /** Draw an image clipped to a circle, scaled to cover it and centered. */
+/**
+ * Canvas has no mipmapping, so an image drawn far smaller than its size aliases (and
+ * shimmers as it moves). Pre-halve it down to `minSize` and draw from the closest level.
+ * @returns {(HTMLImageElement | HTMLCanvasElement)[]} largest first
+ */
+function mipmaps(img, minSize = 16) {
+  const levels = [img];
+  let w = img.naturalWidth || img.width;
+  let h = img.naturalHeight || img.height;
+  while (Math.min(w, h) / 2 >= minSize) {
+    w = Math.round(w / 2);
+    h = Math.round(h / 2);
+    const level = document.createElement("canvas");
+    level.width = w;
+    level.height = h;
+    const ctx = level.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(levels[levels.length - 1], 0, 0, w, h);
+    levels.push(level);
+  }
+  return levels;
+}
+
+/** Cover-fit an image (or mip chain) into a circle. */
 function drawCircleImage(ctx, img, x, y, r, fallback) {
   ctx.save();
   circlePath(ctx, x, y, r);
   if (img) {
     ctx.clip();
-    const iw = img.naturalWidth || img.width;
-    const ih = img.naturalHeight || img.height;
+    const levels = Array.isArray(img) ? img : [img];
+    const iw = levels[0].naturalWidth || levels[0].width;
+    const ih = levels[0].naturalHeight || levels[0].height;
     const scale = Math.max((2 * r) / iw, (2 * r) / ih);
-    ctx.drawImage(img, x - (iw * scale) / 2, y - (ih * scale) / 2, iw * scale, ih * scale);
+    // Smallest level that's still at least as big as what lands on screen.
+    const deviceWidth = iw * scale * ctx.getTransform().a;
+    let level = levels[0];
+    for (const candidate of levels) {
+      if (candidate.width < deviceWidth) break;
+      level = candidate;
+    }
+    ctx.drawImage(level, x - (iw * scale) / 2, y - (ih * scale) / 2, iw * scale, ih * scale);
   } else {
     ctx.fillStyle = fallback;
     ctx.fill();
@@ -131,8 +163,8 @@ class Pal {
       0
     );
     loadImage(avatarURL, (img) => {
-      this.img = img;
-      this.grayImg = grayscale(img);
+      this.img = mipmaps(img);
+      this.grayImg = mipmaps(grayscale(img));
     });
   }
 
@@ -297,7 +329,9 @@ class Group {
   mode = "badge";
   /** The pal wearing the badge (kept while the group shrinks away). */
   badgePal = null;
+  /** Cover art (for the circle) and icon (for the badge), as mip chains. */
   img = null;
+  icon = null;
   size = new Spring(0, 140, 0.45);
   body;
   /** Current label layout, or null while it's hidden. */
@@ -310,7 +344,8 @@ class Group {
     this.name = activity.name;
     this.body = new Body(x, y, 0);
     this.body.space = 30;
-    loadImage(activity.backgroundURL, (img) => (this.img = img));
+    loadImage(activity.backgroundURL, (img) => (this.img = mipmaps(img)));
+    loadImage(activity.iconURL, (img) => (this.icon = mipmaps(img)));
   }
 
   get dying() {
@@ -404,7 +439,7 @@ class Group {
     const { x, y } = this.body;
     const r = this.radius;
     if (r < 0.5) return;
-    drawCircleImage(ctx, this.img, x, y, r, "gray");
+    this.drawArt(ctx, x, y, r);
     // Outer ring fades in as the circle grows.
     const alpha = clamp01((r - 15) / 25);
     if (alpha > 0) {
@@ -431,7 +466,29 @@ class Group {
     ctx.fillStyle = "white";
     ctx.fill();
     ctx.restore();
-    drawCircleImage(ctx, this.img, x, y, r, "gray");
+    this.drawArt(ctx, x, y, r);
+  }
+
+  /** The icon at badge size, the cover art at circle size, crossfading while it grows or shrinks. */
+  drawArt(ctx, x, y, r) {
+    const cover = this.img ?? this.icon;
+    const icon = this.icon ?? this.img;
+    const t = clamp01((r - badgeRadius * 1.5) / 20);
+    if (t < 1) {
+      // Some icons are transparent PNGs, often white glyphs, so give them a dark backing.
+      if (this.icon) {
+        circlePath(ctx, x, y, r);
+        ctx.fillStyle = "#2a2d33";
+        ctx.fill();
+      }
+      drawCircleImage(ctx, icon, x, y, r, "gray");
+    }
+    if (t > 0) {
+      ctx.save();
+      ctx.globalAlpha = t;
+      drawCircleImage(ctx, cover, x, y, r, "gray");
+      ctx.restore();
+    }
   }
 
   /** Game name with a tick down to the ring. */
